@@ -106,12 +106,11 @@ pub async fn run_shell(description: &str, command: &str, fakeroot: bool) -> anyh
         loop {
             let evt = event::read()?;
 
-            if let Event::Key(evt) = evt {
-                if let KeyCode::Char('c') = evt.code
-                    && evt.modifiers.contains(KeyModifiers::CONTROL)
-                {
-                    break;
-                }
+            if let Event::Key(evt) = evt
+                && let KeyCode::Char('c') = evt.code
+                && evt.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                break;
             }
         }
 

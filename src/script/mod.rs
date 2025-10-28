@@ -30,7 +30,7 @@ pub async fn update_build_script(package: &str, version: &str) -> anyhow::Result
         let content = regex.replace(&content, format!("version=\"{}\"", version));
 
         let regex = regex::Regex::new(r"^release=\*$").unwrap();
-        let content = regex.replace(&content, format!("release=\"1\""));
+        let content = regex.replace(&content, "release=\"1\"".to_string());
 
         fs::write_file(&script_path, &content).await?;
     }
