@@ -11,6 +11,19 @@ macro_rules! info {
     }};
 }
 
+macro_rules! warning {
+    ($($arg:tt)*) => {{
+        use crossterm::style::{Color, SetForegroundColor};
+
+        println!(
+            "{}:: {}{}",
+            SetForegroundColor(Color::Yellow),
+            format_args!($($arg)*),
+            SetForegroundColor(Color::Reset)
+        );
+    }};
+}
+
 macro_rules! error {
     ($($arg:tt)*) => {{
         use crossterm::style::{Color, SetForegroundColor};
@@ -26,3 +39,4 @@ macro_rules! error {
 
 pub(crate) use error;
 pub(crate) use info;
+pub(crate) use warning;

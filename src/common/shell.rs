@@ -1,11 +1,9 @@
 use std::{
     io::{Stdout, stdout},
     process::{Stdio, exit},
-    sync::Arc,
 };
 
 use crossterm::{
-    cursor,
     event::{self, Event, KeyCode, KeyModifiers},
     execute,
     style::{Color, Print, ResetColor, SetForegroundColor},
@@ -14,10 +12,9 @@ use crossterm::{
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
-    sync::Mutex,
 };
 
-pub async fn run_shell(description: &str, command: &str, fakeroot: bool) -> anyhow::Result<()> {
+pub async fn run_shell(command: &str, fakeroot: bool) -> anyhow::Result<()> {
     let mut child = if fakeroot {
         Command::new("fakeroot")
             .arg("bash")
@@ -45,29 +42,12 @@ pub async fn run_shell(description: &str, command: &str, fakeroot: bool) -> anyh
 
     let mut stdout = stdout();
 
-    let current_command = Arc::new(Mutex::new(String::new()));
-
-    terminal::enable_raw_mode()?;
-
-    fn draw(
-        stdout: &mut Stdout,
-        description: &str,
-        line: &str,
-        current_command: &str,
-        color: Color,
-    ) -> anyhow::Result<()> {
+    fn draw(stdout: &mut Stdout, line: &str, color: Color) -> anyhow::Result<()> {
         execute!(
             stdout,
             Clear(ClearType::CurrentLine),
             SetForegroundColor(color),
             Print(format!("{}\n", line)),
-            cursor::MoveDown(1),
-            cursor::MoveToColumn(0),
-            SetForegroundColor(Color::Blue),
-            Print(format!("{}: ", description)),
-            Print(current_command),
-            SetForegroundColor(Color::Reset),
-            cursor::MoveToColumn(0),
             ResetColor
         )?;
 
@@ -78,21 +58,19 @@ pub async fn run_shell(description: &str, command: &str, fakeroot: bool) -> anyh
         tokio::select! {
             line = stdout_lines.next_line() => {
                 if let Ok(Some(line)) = line {
-                    let  current_command = current_command.lock().await;
-                    draw(&mut stdout, description, &line, &current_command, Color::Reset)?;
+                    draw(&mut stdout, &line, Color::Reset)?;
                 } else {
                     break;
                 }
             }
             line = stderr_lines.next_line() => {
                 if let Ok(Some(line)) = line {
-                    let mut current_command = current_command.lock().await;
                     if line.starts_with("+ ") {
-                        *current_command = line.trim_start_matches("+ ").trim().to_string();
+                        let current_command = line.trim_start_matches("+ ").trim().to_string();
                         let line = format!("$ {}", current_command);
-                        draw(&mut stdout, description, &line, &current_command, Color::Blue)?;
+                        draw(&mut stdout, &line, Color::Blue)?;
                     } else if !line.starts_with('+') {
-                        draw(&mut stdout, description, &line, &current_command, Color::Yellow)?;
+                        draw(&mut stdout, &line, Color::Yellow)?;
                     }
 
                 } else {

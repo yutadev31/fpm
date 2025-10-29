@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use fpm::{
-    MakeOptions, install_packages, make_packages, new_build_script, remove_packages,
-    update_build_script,
+    MakeOptions, check_dependencies, install_packages, make_packages, new_build_script,
+    remove_packages, update_build_script,
 };
 
 #[derive(Debug, Parser)]
@@ -44,6 +44,7 @@ enum EditScriptSubcommands {
         #[arg()]
         version: String,
     },
+    CheckDependencies,
 }
 
 #[tokio::main]
@@ -57,6 +58,9 @@ async fn main() -> anyhow::Result<()> {
             }
             EditScriptSubcommands::Update { package, version } => {
                 update_build_script(package, version).await?;
+            }
+            EditScriptSubcommands::CheckDependencies => {
+                check_dependencies().await?;
             }
         },
         Commands::Make(opts) => make_packages(opts.clone()).await?,

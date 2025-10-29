@@ -17,7 +17,7 @@ const MIRROR_FILE: &str = "mirrors.txt";
 pub use install::install_packages;
 pub use make::{MakeOptions, make_packages};
 pub use remove::remove_packages;
-pub use script::{new_build_script, update_build_script};
+pub use script::{check_dependencies, new_build_script, update_build_script};
 
 async fn get_all_build_scripts() -> anyhow::Result<Vec<String>> {
     let scripts = utils::fs::list_dir(PKGS_DIR).await?;

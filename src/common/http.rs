@@ -8,7 +8,7 @@ use crossterm::{
     terminal::{Clear, ClearType, size as term_size},
 };
 use futures::StreamExt;
-use reqwest::Client;
+use reqwest::{Client, header::USER_AGENT, redirect};
 use tokio::io::AsyncWriteExt;
 
 use crate::utils::path;
@@ -16,7 +16,10 @@ use crate::utils::path;
 pub async fn download_file(url: &str, dest: &str) -> anyhow::Result<()> {
     let filename = path::get_filename(url).ok_or(anyhow!("Failed to get filename"))?;
 
-    let client = Client::new();
+    let client = Client::builder()
+        .redirect(redirect::Policy::limited(10))
+        .user_agent("Wget/1.25.0 (linux-gnu)")
+        .build()?;
     let resp = client.get(url).send().await?;
     if !resp.status().is_success() {
         anyhow::bail!("HTTP error: {}", resp.status());

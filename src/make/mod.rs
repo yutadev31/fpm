@@ -3,20 +3,56 @@ use std::{path::Path, process::exit, time::Duration};
 use anyhow::anyhow;
 use clap::Parser;
 use regex::Regex;
-use tokio::{process::Command, time::sleep};
+use tokio::time::sleep;
 
 use crate::{
     DIST_DIR, DOWNLOAD_WAIT_TIME, LOCAL_PKG_DB_PATH, MIRROR_FILE, PKGS_DIR, SCRIPT_NAME,
     SOURCES_DIR,
     common::{shell::run_shell, *},
     get_all_build_scripts,
-    package::PkgInfo,
+    package::Package,
     utils::{
         log::{error, info},
         path::get_filename,
         *,
     },
 };
+
+// struct SimpleVerifier {
+//     cert: Vec<Cert>,
+// }
+
+// impl<'a> VerificationHelper for SimpleVerifier {
+//     fn get_certs(&mut self, _ids: &[KeyHandle]) -> openpgp::Result<Vec<Cert>> {
+//         // 署名者の鍵として渡す
+//         Ok(self.cert.clone())
+//     }
+
+//     fn check(&mut self, structure: MessageStructure) -> anyhow::Result<()> {
+//         for layer in structure.iter() {
+//             if let MessageLayer::SignatureGroup { results } = layer {
+//                 for sig in results {
+//                     match sig {
+//                         Ok(good) => {
+//                             let fp_list = good.sig.issuer_fingerprints();
+//                             for fp in fp_list {
+//                                 let Some(_) =
+//                                     self.cert.iter().find(|cert| cert.fingerprint() == *fp)
+//                                 else {
+//                                     bail!("Unknown certificate: {}", fp);
+//                                 };
+//                             }
+//                         }
+//                         Err(err) => {
+//                             bail!("Verification failed: {}", err)
+//                         }
+//                     }
+//                 }
+//             }
+//         }
+//         Ok(())
+//     }
+// }
 
 #[derive(Debug, Clone, Parser)]
 pub struct MakeOptions {
@@ -37,7 +73,6 @@ pub struct MakeOptions {
 }
 
 async fn run_script_function(
-    description: &str,
     package_name: &str,
     function_name: &str,
     fakeroot: bool,
@@ -49,7 +84,7 @@ async fn run_script_function(
         PKGS_DIR, package_name, SCRIPT_NAME, pkg_dir, work_dir, function_name, function_name
     );
 
-    run_shell(description, &script, fakeroot).await?;
+    run_shell(&script, fakeroot).await?;
 
     Ok(())
 }
@@ -70,14 +105,14 @@ async fn create_tmp_dirs(package_name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn get_dist_filepath(info: &PkgInfo) -> String {
+fn get_dist_filepath(info: &Package) -> String {
     format!(
         "{}/{}-{}-{}.tar.zstd",
         DIST_DIR, info.name, info.version, info.release
     )
 }
 
-async fn is_exists_dist(info: &PkgInfo) -> anyhow::Result<bool> {
+async fn is_exists_dist(info: &Package) -> anyhow::Result<bool> {
     let filepath = get_dist_filepath(info);
     let exists = fs::exists_file(&filepath).await?;
     Ok(exists)
@@ -97,92 +132,6 @@ async fn get_mirrors(filepath: &str) -> anyhow::Result<Vec<(String, String)>> {
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(mirrors)
-}
-
-async fn get_pkg_info(
-    package_name: &str,
-    mirrors: Vec<(String, String)>,
-) -> anyhow::Result<PkgInfo> {
-    info!("Getting package information...");
-
-    async fn get_package_var(
-        package_name: &str,
-        var_name: &str,
-        is_list: bool,
-    ) -> anyhow::Result<String> {
-        let var = if is_list {
-            format!("${{{}[@]}}", var_name)
-        } else {
-            format!("${{{}}}", var_name)
-        };
-
-        let output = Command::new("bash")
-            .arg("-eu")
-            .arg("-c")
-            .arg(format!(
-                "source '{}/{}/{}'; echo \"{}\"",
-                PKGS_DIR, package_name, SCRIPT_NAME, var
-            ))
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            anyhow::bail!(
-                "Failed to get variable {} for package {}",
-                var_name,
-                package_name
-            );
-        }
-
-        let var_value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Ok(var_value)
-    }
-
-    let pkg_name = get_package_var(package_name, "name", false).await?;
-    let pkg_version = get_package_var(package_name, "version", false).await?;
-    let pkg_release = get_package_var(package_name, "release", false).await?;
-    let pkg_sources = get_package_var(package_name, "sources", true).await?;
-    let pkg_sha256sums = get_package_var(package_name, "sha256sums", true).await?;
-    let pkg_sha512sums = get_package_var(package_name, "sha512sums", true).await?;
-    let pkg_b2sums = get_package_var(package_name, "b2sums", true).await?;
-    let pkg_validpgpkeys = get_package_var(package_name, "validpgpkeys", true).await?;
-    let pkg_dependencies = get_package_var(package_name, "dependencies", true).await?;
-
-    fn parse_list(var: &str) -> Vec<String> {
-        var.split_whitespace().map(|s| s.to_string()).collect()
-    }
-
-    fn replace_mirrors(sources: Vec<String>, mirrors: Vec<(String, String)>) -> Vec<String> {
-        sources
-            .iter()
-            .map(|src| {
-                let mut src = src.clone();
-                for mirror in mirrors.iter() {
-                    src = src.replace(&mirror.0, &mirror.1);
-                }
-                src
-            })
-            .collect()
-    }
-
-    let info = PkgInfo {
-        name: pkg_name,
-        version: pkg_version,
-        release: pkg_release,
-        sources: replace_mirrors(parse_list(&pkg_sources), mirrors),
-        sha256sums: parse_list(&pkg_sha256sums),
-        sha512sums: parse_list(&pkg_sha512sums),
-        b2sums: parse_list(&pkg_b2sums),
-        validpgpkeys: parse_list(&pkg_validpgpkeys),
-        dependencies: parse_list(&pkg_dependencies),
-    };
-
-    println!(
-        "Package information retrieved: {} {}",
-        info.name, info.version
-    );
-
-    Ok(info)
 }
 
 async fn check_dependencies(dependencies: &[String]) -> anyhow::Result<()> {
@@ -216,6 +165,8 @@ async fn download_sources(sources: &[String]) -> anyhow::Result<Vec<String>> {
     let mut filepaths = Vec::new();
     let regex = Regex::new(r"http.*")?;
 
+    fs::create_dir(SOURCES_DIR).await?;
+
     for source in sources {
         if !regex.is_match(source) {
             continue;
@@ -230,9 +181,9 @@ async fn download_sources(sources: &[String]) -> anyhow::Result<Vec<String>> {
             continue;
         }
 
-        println!("DEBUG: {}", source);
+        let command = format!("wget -q \"{}\" -P \"{}\"", source, SOURCES_DIR);
+        run_shell(&command, false).await?;
 
-        http::download_file(source, &filepath).await?;
         sleep(Duration::from_millis(DOWNLOAD_WAIT_TIME)).await;
 
         if !Path::new(&filepath).is_file() {
@@ -245,7 +196,7 @@ async fn download_sources(sources: &[String]) -> anyhow::Result<Vec<String>> {
     Ok(filepaths)
 }
 
-async fn check_sums(filepaths: &[String], info: &PkgInfo) -> anyhow::Result<()> {
+async fn check_sums(filepaths: &[String], info: &Package) -> anyhow::Result<()> {
     info!("Checking checksums...");
 
     for (i, filepath) in filepaths.iter().enumerate() {
@@ -253,74 +204,97 @@ async fn check_sums(filepaths: &[String], info: &PkgInfo) -> anyhow::Result<()> 
             hash::check_sum(filepath, &info.sha256sums[i], hash::Algorithm::Sha256).await?;
         }
         if i < info.sha512sums.len() && !info.sha512sums[i].is_empty() {
-            hash::check_sum(filepath, &info.sha256sums[i], hash::Algorithm::Sha512).await?;
+            hash::check_sum(filepath, &info.sha512sums[i], hash::Algorithm::Sha512).await?;
         }
         if i < info.b2sums.len() && !info.b2sums[i].is_empty() {
-            hash::check_sum(filepath, &info.sha256sums[i], hash::Algorithm::Blake2).await?;
+            hash::check_sum(filepath, &info.b2sums[i], hash::Algorithm::Blake2).await?;
         }
     }
 
     Ok(())
 }
 
-async fn verify_signatures(filepaths: &[String], _validpgpkeys: &[String]) -> anyhow::Result<()> {
-    info!("Verifying signatures...");
+// TODO
+// async fn verify_signatures(filepaths: &[String], validpgpkeys: &[String]) -> anyhow::Result<()> {
+//     info!("Verifying signatures...");
 
-    let mut sign_files = Vec::new();
-    let mut source_files = Vec::new();
+//     let mut sign_files = Vec::new();
+//     let mut source_files = Vec::new();
 
-    for filepath in filepaths {
-        if path::is_signature_file(filepath) {
-            sign_files.push(filepath);
-        } else {
-            source_files.push(filepath);
-        }
-    }
+//     for filepath in filepaths {
+//         if path::is_signature_file(filepath) {
+//             sign_files.push(filepath);
+//         } else {
+//             source_files.push(filepath);
+//         }
+//     }
 
-    for sign_file in sign_files {
-        let base_name = Path::new(sign_file)
-            .file_stem()
-            .ok_or(anyhow::anyhow!("Failed to get file stem"))?
-            .to_string_lossy()
-            .to_string();
+//     for sign_file in sign_files {
+//         let base_name = Path::new(sign_file)
+//             .file_stem()
+//             .ok_or(anyhow::anyhow!("Failed to get file stem"))?
+//             .to_string_lossy()
+//             .to_string();
 
-        if let Some(source_file) = source_files
-            .iter()
-            .find(|f| {
-                path::get_filename(f).is_some() && path::get_filename(f).unwrap() == base_name
-            })
-            .or(source_files.iter().find(|f| {
-                path::get_filename(f).is_some() && path::get_filename(f).unwrap() == base_name
-            }))
-        {
-            println!("Verifying signature for file: {}", source_file);
+//         if let Some(source_file) = source_files
+//             .iter()
+//             .find(|f| {
+//                 path::get_filename(f).is_some() && path::get_filename(f).unwrap() == base_name
+//             })
+//             .or(source_files.iter().find(|f| {
+//                 path::get_filename(f).is_some() && path::get_filename(f).unwrap() == base_name
+//             }))
+//         {
+//             println!("Verifying signature for file: {}", source_file);
 
-            let output = Command::new("gpg")
-                .arg("--verify")
-                .arg(sign_file)
-                .arg(source_file)
-                .output()
-                .await?;
+//             let ks = KeyServer::new("hkps://keyserver.ubuntu.com")?;
 
-            if !output.status.success() {
-                anyhow::bail!("Signature verification failed for file: {}", source_file);
-            }
+//             let mut cert = Vec::new();
+//             for fingerprint in validpgpkeys {
+//                 let fingerprint = Fingerprint::from_hex(fingerprint)?;
+//                 println!("Looking for key: {}", fingerprint);
 
-            // TODO validpgpkeysを使うように変更
+//                 cert.push(
+//                     ks.get(fingerprint)
+//                         .await?
+//                         .iter()
+//                         .filter_map(|f| f.as_ref().ok().cloned())
+//                         .collect::<Vec<_>>(),
+//                 );
+//             }
 
-            info!("Signature verified for file: {}", source_file);
-        } else {
-            anyhow::bail!(
-                "No matching source file found for signature file: {}",
-                sign_file
-            );
-        }
-    }
+//             let mut source_content = Vec::new();
+//             File::open(source_file)?.read_to_end(&mut source_content)?;
 
-    Ok(())
-}
+//             let mut sig_content = Vec::new();
+//             File::open(sign_file)?.read_to_end(&mut sig_content)?;
 
-async fn extract_sources(info: &PkgInfo) -> anyhow::Result<()> {
+//             println!("Verifying signature for file: {}", source_file);
+
+//             let policy = &StandardPolicy::new();
+//             DetachedVerifierBuilder::from_bytes(&sig_content)?
+//                 .with_policy(
+//                     policy,
+//                     None,
+//                     SimpleVerifier {
+//                         cert: cert.iter().flat_map(|f| f.clone()).collect(),
+//                     },
+//                 )?
+//                 .verify_bytes(source_content)?;
+
+//             info!("Signature verified for file: {}", source_file);
+//         } else {
+//             anyhow::bail!(
+//                 "No matching source file found for signature file: {}",
+//                 sign_file
+//             );
+//         }
+//     }
+
+//     Ok(())
+// }
+
+async fn extract_sources(info: &Package) -> anyhow::Result<()> {
     info!("Extracting sources...");
     let (work_dir, _) = get_dirs(&info.name)?;
     let regex = Regex::new(r"http.*")?;
@@ -332,7 +306,7 @@ async fn extract_sources(info: &PkgInfo) -> anyhow::Result<()> {
         if regex.is_match(source) {
             if path::is_tar_file(&filename) {
                 let script = format!("tar -xf {} -C {} --strip-components=1", filepath, work_dir);
-                run_shell("Extracting tar file", &script, false).await?;
+                run_shell(&script, false).await?;
             } else {
                 let dest_path = format!("{}/{}", work_dir, filename);
                 fs::copy_file(&filepath, &dest_path).await?;
@@ -347,31 +321,31 @@ async fn extract_sources(info: &PkgInfo) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn prepare(info: &PkgInfo) -> anyhow::Result<()> {
+async fn prepare(info: &Package) -> anyhow::Result<()> {
     info!("Preparing...");
-    run_script_function("Preparing", &info.name, "prepare", false).await?;
+    run_script_function(&info.name, "prepare", false).await?;
     Ok(())
 }
 
-async fn build(info: &PkgInfo) -> anyhow::Result<()> {
+async fn build(info: &Package) -> anyhow::Result<()> {
     info!("Building...");
-    run_script_function("Building", &info.name, "build", false).await?;
+    run_script_function(&info.name, "build", false).await?;
     Ok(())
 }
 
-async fn test(info: &PkgInfo) -> anyhow::Result<()> {
+async fn test(info: &Package) -> anyhow::Result<()> {
     info!("Testing...");
-    run_script_function("Testing", &info.name, "test", false).await?;
+    run_script_function(&info.name, "test", false).await?;
     Ok(())
 }
 
-async fn package(info: &PkgInfo) -> anyhow::Result<()> {
+async fn package(info: &Package) -> anyhow::Result<()> {
     info!("Packaging...");
-    run_script_function("Packaging", &info.name, "package", true).await?;
+    run_script_function(&info.name, "package", true).await?;
     Ok(())
 }
 
-async fn create_archive(info: &PkgInfo) -> anyhow::Result<()> {
+async fn create_archive(info: &Package) -> anyhow::Result<()> {
     info!("Creating archive...");
 
     let (_, pkg_dir) = get_dirs(&info.name)?;
@@ -384,12 +358,12 @@ async fn create_archive(info: &PkgInfo) -> anyhow::Result<()> {
         DIST_DIR, output_name, pkg_dir
     );
 
-    run_shell("Creating archive", &script, true).await?;
+    run_shell(&script, true).await?;
 
     Ok(())
 }
 
-async fn sign_archive(info: &PkgInfo) -> anyhow::Result<()> {
+async fn sign_archive(info: &Package) -> anyhow::Result<()> {
     info!("Signing archive...");
 
     let output_name = format!("{}-{}-{}", info.name, info.version, info.release);
@@ -399,12 +373,12 @@ async fn sign_archive(info: &PkgInfo) -> anyhow::Result<()> {
         DIST_DIR, output_name, DIST_DIR, output_name
     );
 
-    run_shell("Signing archive", &script, true).await?;
+    run_shell(&script, true).await?;
 
     Ok(())
 }
 
-async fn write_metadata(info: &PkgInfo) -> anyhow::Result<()> {
+async fn write_metadata(info: &Package) -> anyhow::Result<()> {
     info!("Writing package metadata...");
 
     let filepath = format!("{}/{}.meta", DIST_DIR, info.name);
@@ -415,7 +389,7 @@ async fn write_metadata(info: &PkgInfo) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cleanup(info: &PkgInfo) -> anyhow::Result<()> {
+async fn cleanup(info: &Package) -> anyhow::Result<()> {
     info!("Cleaning up...");
 
     let (work_dir, pkg_dir) = get_dirs(&info.name)?;
@@ -446,7 +420,7 @@ async fn make_package(
         disable_check_depends: bool,
     ) -> anyhow::Result<()> {
         let mirrors = get_mirrors(MIRROR_FILE).await?;
-        let info = get_pkg_info(package_name, mirrors).await?;
+        let info = Package::get(package_name, mirrors).await?;
 
         if is_exists_dist(&info).await? {
             if rebuild {
@@ -466,7 +440,7 @@ async fn make_package(
 
         let filepaths = download_sources(&info.sources).await?;
         check_sums(&filepaths, &info).await?;
-        verify_signatures(&filepaths, &info.validpgpkeys).await?;
+        // verify_signatures(&filepaths, &info.validpgpkeys).await?;
 
         create_tmp_dirs(&info.name).await?;
         extract_sources(&info).await?;
@@ -516,5 +490,6 @@ pub async fn make_packages(opts: MakeOptions) -> anyhow::Result<()> {
             .await;
         }
     }
-    Ok(())
+
+    exit(0);
 }
