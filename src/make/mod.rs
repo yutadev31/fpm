@@ -181,7 +181,7 @@ async fn download_sources(sources: &[String]) -> anyhow::Result<Vec<String>> {
             continue;
         }
 
-        let command = format!("wget -q \"{}\" -P \"{}\"", source, SOURCES_DIR);
+        let command = format!("wget \"{}\" -P \"{}\"", source, SOURCES_DIR);
         run_shell(&command, false).await?;
 
         sleep(Duration::from_millis(DOWNLOAD_WAIT_TIME)).await;
