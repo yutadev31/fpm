@@ -1,29 +1,17 @@
-use std::{fs::File, io::BufReader};
+use std::{
+    fs::{self, File},
+    io::{self, BufReader},
+    os::unix,
+    path::Path,
+};
 
+use anyhow::bail;
 use tar::Archive;
 use zstd::stream::read::Decoder;
 
-use crate::{
-    DIST_DIR,
-    utils::{log::*, *},
-};
+use crate::utils::log::*;
 
-async fn read_metadata(package_id: &str) -> anyhow::Result<(String, String, String)> {
-    info!("Reading package metadata...");
-
-    let metadata_path = format!("{}/{}.meta", DIST_DIR, package_id);
-    let metadata = fs::read_file(&metadata_path).await?;
-
-    let mut lines = metadata.lines();
-    let name = lines.next().unwrap().to_string();
-    let version = lines.next().unwrap().to_string();
-    let release = lines.next().unwrap().to_string();
-
-    info!("Package metadata read successfully!");
-    Ok((name, version, release))
-}
-
-fn extract_package(filepath: &str) -> anyhow::Result<()> {
+fn extract_package(filepath: &str, dest: &str) -> anyhow::Result<()> {
     info!("Extracting package...");
 
     let file = File::open(filepath)?;
@@ -32,22 +20,51 @@ fn extract_package(filepath: &str) -> anyhow::Result<()> {
     let mut decoder = Decoder::new(buf)?;
     let mut tar = Archive::new(&mut decoder);
 
+    let mut conflict_flag = false;
     for entry in tar.entries()? {
-        let entry = entry?;
+        let mut entry = entry?;
         let path = entry.path()?;
 
-        println!("File: {}", path.to_string_lossy());
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_file() {
+            let dest_path = Path::new(dest).join(path);
+            if dest_path.exists() {
+                error!("File already exists: {}", dest_path.display());
+                conflict_flag = true;
+            }
+        }
+    }
+
+    if conflict_flag {
+        bail!("Conflicts detected")
+    }
+
+    for entry in tar.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?;
+
+        let dest_path = Path::new(dest).join(path);
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_dir() {
+            fs::create_dir_all(dest_path)?;
+        } else if entry_type.is_file() {
+            let mut outfile = File::create(dest_path)?;
+            io::copy(&mut entry, &mut outfile)?;
+        } else if entry_type.is_symlink()
+            && let Some(target) = entry.link_name()?
+        {
+            unix::fs::symlink(target, dest_path)?;
+        }
     }
 
     Ok(())
 }
 
-pub async fn install_packages(packages: &Vec<String>) -> anyhow::Result<()> {
-    for package in packages {
-        let (name, version, release) = read_metadata(package).await?;
-        let filepath = format!("{}/{}-{}-{}.tar.zst", DIST_DIR, name, version, release);
+pub async fn install_packages(packages: &Vec<String>, dest: Option<String>) -> anyhow::Result<()> {
+    let dest = dest.unwrap_or("/".to_string());
 
-        extract_package(&filepath)?;
+    for package in packages {
+        extract_package(package, &dest)?;
     }
 
     Ok(())
