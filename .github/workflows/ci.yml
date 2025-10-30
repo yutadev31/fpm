@@ -21,7 +21,9 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@v2
       - name: Install dependencies
-        run: apt install -y nettle-dev
+        run: |
+          sudo apt update
+          sudo apt install -y nettle-dev
       - name: Build project
         run: cargo build --release --verbose
       - name: Run tests
