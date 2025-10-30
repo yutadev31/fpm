@@ -22,7 +22,7 @@ fn extract_package(filepath: &str, dest: &str) -> anyhow::Result<()> {
 
     let mut conflict_flag = false;
     for entry in tar.entries()? {
-        let mut entry = entry?;
+        let entry = entry?;
         let path = entry.path()?;
 
         let entry_type = entry.header().entry_type();
