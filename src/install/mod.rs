@@ -1,15 +1,26 @@
 use std::{
     fs::{self, File},
-    io::{self, BufReader, Write},
+    io::{self, BufReader, Read, Seek, SeekFrom, Write},
     os::unix,
     path::{Path, PathBuf},
 };
 
 use anyhow::bail;
+use serde::Deserialize;
 use tar::Archive;
+use tokio::fs::create_dir_all;
 use zstd::stream::read::Decoder;
 
 use crate::utils::log::*;
+
+const CACHE_DIR: &str = "var/lib/fpm/cache";
+
+#[derive(Debug, Clone, Deserialize)]
+struct Metadata {
+    name: String,
+    version: String,
+    release: String,
+}
 
 pub async fn install_packages(packages: &Vec<String>, dest: Option<String>) -> anyhow::Result<()> {
     let dest = dest.unwrap_or("/".to_string());
@@ -17,6 +28,8 @@ pub async fn install_packages(packages: &Vec<String>, dest: Option<String>) -> a
     let mut conflict_flag = false;
     let mut tar_archives = Vec::new();
     let mut file_lists = Vec::new();
+
+    let mut metadatas = Vec::new();
 
     for package in packages {
         let filepath = package;
@@ -28,12 +41,24 @@ pub async fn install_packages(packages: &Vec<String>, dest: Option<String>) -> a
         let decoder = Decoder::new(buf)?;
         let mut tar = Archive::new(decoder);
 
+        let mut metadata_buf = None;
+
         for entry in tar.entries()? {
-            let entry = entry?;
+            let mut entry = entry?;
             let path = entry.path()?;
 
+            if path.ends_with("./METADATA") {
+                let mut buf = String::new();
+                entry.read_to_string(&mut buf)?;
+
+                let metadata: Metadata = serde_yaml::from_str(&buf)?;
+                metadata_buf = Some(metadata);
+
+                continue;
+            }
+
             let entry_type = entry.header().entry_type();
-            if entry_type.is_file() {
+            if entry_type.is_file() || entry_type.is_symlink() {
                 let dest_path = Path::new(&dest).join(&path);
                 if dest_path.exists() {
                     error!("File already exists: {}", dest_path.display());
@@ -42,14 +67,17 @@ pub async fn install_packages(packages: &Vec<String>, dest: Option<String>) -> a
 
                 let path = PathBuf::from(path);
                 file_list.push(path);
-            } else if entry_type.is_symlink() {
-                let path = PathBuf::from(path);
-                file_list.push(path);
             }
         }
 
         tar_archives.push(tar);
         file_lists.push(file_list);
+
+        if metadata_buf.is_none() {
+            bail!("Metadata not found");
+        }
+
+        metadatas.push(metadata_buf.unwrap());
     }
 
     if conflict_flag {
@@ -57,18 +85,34 @@ pub async fn install_packages(packages: &Vec<String>, dest: Option<String>) -> a
     }
 
     let local_pkgs_dir = Path::new(&dest).join("var/lib/fpm/local/pkgs");
+    create_dir_all(&local_pkgs_dir).await?;
 
     for (index, package) in packages.iter().enumerate() {
-        let db_path = local_pkgs_dir.join(format!("{}.txt", package));
+        let filepath = package;
+
+        let file = File::open(filepath)?;
+        let buf = BufReader::new(file);
+
+        let decoder = Decoder::new(buf)?;
+        let mut tar = Archive::new(decoder);
+
+        let metadata = metadatas[index].clone();
+
+        let db_path = local_pkgs_dir.join(format!("{}.txt", metadata.name));
+        info!("Creating database file: {}", db_path.display());
         let mut db_file = File::create(db_path)?;
 
         for file in file_lists[index].iter() {
             writeln!(db_file, "{}", file.display())?;
         }
 
-        for entry in tar_archives[index].entries()? {
+        for entry in tar.entries()? {
             let mut entry = entry?;
             let path = entry.path()?;
+
+            if path.ends_with("./METADATA") {
+                continue;
+            }
 
             let dest_path = Path::new(&dest).join(path);
             let entry_type = entry.header().entry_type();
